@@ -1,14 +1,11 @@
 global.crypto = require('crypto')
 const { default: makeWASocket, DisconnectReason, useMultiFileAuthState } = require('@whiskeysockets/baileys')
-const { Boom } = require('@hapi/boom')
-const QRCode = require('qrcode-terminal')
 
 async function askClaude(userMessage, conversationHistory = []) {
   const messages = [
     ...conversationHistory,
     { role: 'user', content: userMessage }
   ]
-
   const response = await fetch('https://api.anthropic.com/v1/messages', {
     method: 'POST',
     headers: {
@@ -23,7 +20,6 @@ async function askClaude(userMessage, conversationHistory = []) {
       messages
     })
   })
-
   const data = await response.json()
   if (data.error) throw new Error(data.error.message)
   return data.content[0].text
@@ -34,6 +30,8 @@ const conversations = new Map()
 async function connectToWhatsApp() {
   const { state, saveCreds } = await useMultiFileAuthState('auth_info')
 
+  const phoneNumber = process.env.PHONE_NUMBER
+
   const sock = makeWASocket({
     auth: state,
     printQRInTerminal: false,
@@ -42,15 +40,21 @@ async function connectToWhatsApp() {
 
   sock.ev.on('creds.update', saveCreds)
 
-  sock.ev.on('connection.update', (update) => {
+  sock.ev.on('connection.update', async (update) => {
     const { connection, lastDisconnect, qr } = update
 
-    if (qr) {
-      console.log('\n\n======= امسح الـ QR Code ده بواتساب =======\n')
-      QRCode.generate(qr, { small: true }, function(qrcode) {
-        console.log(qrcode)
-      })
-      console.log('\n======= واتساب → الأجهزة المتصلة → ربط جهاز =======\n\n')
+    if (qr && phoneNumber) {
+      try {
+        const code = await sock.requestPairingCode(phoneNumber)
+        console.log('\n\n====================================')
+        console.log('كود الربط بتاعك هو:')
+        console.log(code)
+        console.log('====================================')
+        console.log('روح واتساب → الإعدادات → الأجهزة المتصلة → ربط جهاز → ربط برمز')
+        console.log('====================================\n\n')
+      } catch (e) {
+        console.error('Error getting pairing code:', e.message)
+      }
     }
 
     if (connection === 'close') {
@@ -64,7 +68,6 @@ async function connectToWhatsApp() {
 
   sock.ev.on('messages.upsert', async ({ messages, type }) => {
     if (type !== 'notify') return
-
     const msg = messages[0]
     if (!msg.message || msg.key.fromMe) return
 
@@ -73,7 +76,6 @@ async function connectToWhatsApp() {
 
     const text = msg.message.conversation ||
                  msg.message.extendedTextMessage?.text || ''
-
     if (!text) return
 
     const sender = msg.key.remoteJid
@@ -82,15 +84,11 @@ async function connectToWhatsApp() {
     try {
       if (!conversations.has(sender)) conversations.set(sender, [])
       const history = conversations.get(sender)
-
       await sock.sendPresenceUpdate('composing', sender)
-
       const reply = await askClaude(text, history)
-
       history.push({ role: 'user', content: text })
       history.push({ role: 'assistant', content: reply })
       if (history.length > 20) history.splice(0, 2)
-
       await sock.sendMessage(sender, { text: reply })
       console.log(`✅ Replied to ${sender}`)
     } catch (err) {
