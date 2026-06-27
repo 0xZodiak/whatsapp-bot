@@ -1,6 +1,7 @@
 global.crypto = require('crypto')
 const { default: makeWASocket, DisconnectReason, useMultiFileAuthState } = require('@whiskeysockets/baileys')
 const { Boom } = require('@hapi/boom')
+const QRCode = require('qrcode-terminal')
 
 async function askClaude(userMessage, conversationHistory = []) {
   const messages = [
@@ -18,7 +19,7 @@ async function askClaude(userMessage, conversationHistory = []) {
     body: JSON.stringify({
       model: 'claude-sonnet-4-6',
       max_tokens: 1000,
-      system: process.env.BOT_SYSTEM_PROMPT || 'أنت مساعد خدمة عملاء محترف ومفيد. رد بشكل مختصر وواضح. إذا سألك العميل سؤالاً لا تعرف إجابته، اعتذر بأدب واقترح التواصل مع فريق الدعم.',
+      system: process.env.BOT_SYSTEM_PROMPT || 'أنت مساعد خدمة عملاء محترف ومفيد. رد بشكل مختصر وواضح.',
       messages
     })
   })
@@ -28,7 +29,6 @@ async function askClaude(userMessage, conversationHistory = []) {
   return data.content[0].text
 }
 
-// بنخزن تاريخ المحادثات في الميموري
 const conversations = new Map()
 
 async function connectToWhatsApp() {
@@ -36,20 +36,29 @@ async function connectToWhatsApp() {
 
   const sock = makeWASocket({
     auth: state,
-    printQRInTerminal: true,
+    printQRInTerminal: false,
     browser: ['WhatsApp Bot', 'Chrome', '1.0.0']
   })
 
   sock.ev.on('creds.update', saveCreds)
 
   sock.ev.on('connection.update', (update) => {
-    const { connection, lastDisconnect } = update
+    const { connection, lastDisconnect, qr } = update
+
+    if (qr) {
+      console.log('\n\n======= امسح الـ QR Code ده بواتساب =======\n')
+      QRCode.generate(qr, { small: true }, function(qrcode) {
+        console.log(qrcode)
+      })
+      console.log('\n======= واتساب → الأجهزة المتصلة → ربط جهاز =======\n\n')
+    }
+
     if (connection === 'close') {
       const shouldReconnect = lastDisconnect?.error?.output?.statusCode !== DisconnectReason.loggedOut
       console.log('Connection closed. Reconnecting:', shouldReconnect)
       if (shouldReconnect) connectToWhatsApp()
     } else if (connection === 'open') {
-      console.log('✅ WhatsApp connected!')
+      console.log('✅ WhatsApp connected successfully!')
     }
   })
 
@@ -59,7 +68,6 @@ async function connectToWhatsApp() {
     const msg = messages[0]
     if (!msg.message || msg.key.fromMe) return
 
-    // تجاهل رسائل الجروبات لو مش عايزها
     const isGroup = msg.key.remoteJid.endsWith('@g.us')
     if (isGroup && process.env.IGNORE_GROUPS === 'true') return
 
@@ -72,16 +80,13 @@ async function connectToWhatsApp() {
     console.log(`📩 Message from ${sender}: ${text}`)
 
     try {
-      // جيب تاريخ المحادثة
       if (!conversations.has(sender)) conversations.set(sender, [])
       const history = conversations.get(sender)
 
-      // بعت "جاري الكتابة..."
       await sock.sendPresenceUpdate('composing', sender)
 
       const reply = await askClaude(text, history)
 
-      // حدّث تاريخ المحادثة (آخر 10 رسائل بس عشان متتقلش)
       history.push({ role: 'user', content: text })
       history.push({ role: 'assistant', content: reply })
       if (history.length > 20) history.splice(0, 2)
